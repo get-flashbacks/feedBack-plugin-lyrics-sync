@@ -179,21 +179,37 @@ function _lsFormatTime(seconds) {
     return `${String(m).padStart(2, '0')}:${s}`;
 }
 
+function _lsGroupSegmentsByLine(segments) {
+    // word/syllable granularity returns one segment per word/syllable, with
+    // `new_line: true` on the first entry of each ORIGINAL input line (see
+    // the demucs-server's /align docs). Re-group them back into one chunk
+    // per line so the preview reads the way the lyrics were typed, instead
+    // of one row per individual word.
+    const lines = [];
+    for (const seg of segments) {
+        if (seg.new_line || lines.length === 0) {
+            lines.push({ start: seg.start, words: [seg.text] });
+        } else {
+            lines[lines.length - 1].words.push(seg.text);
+        }
+    }
+    return lines.map(l => ({ start: l.start, text: l.words.join(' ') }));
+}
+
 function _lsRenderPreview(segments) {
     const container = document.getElementById('ls-preview-lines');
     const granularity = _lsGetGranularity();
 
-    // All modes: each entry on its own row with visible timestamp
-    // Word and syllable get a separator between phrase groups
-    container.innerHTML = segments.map((seg, i) => {
-        const separator = (granularity !== 'line' && seg.new_line && i > 0)
-            ? '<div class="border-t border-gray-800/50 my-1"></div>' : '';
-        return separator + `
+    // 'line' granularity: each segment already IS a whole input line.
+    // 'word'/'syllable': re-group into one row per line so chunks line up
+    // with how the lyrics were typed, rather than one row per token.
+    const rows = granularity === 'line' ? segments : _lsGroupSegmentsByLine(segments);
+
+    container.innerHTML = rows.map((row) => `
         <div class="flex gap-3 py-1 hover:bg-dark-700/30 rounded px-2 transition">
-            <span class="text-accent/70 text-xs whitespace-nowrap mt-0.5">[${_lsFormatTime(seg.start)}]</span>
-            <span class="text-gray-300">${esc(seg.text)}</span>
-        </div>`;
-    }).join('');
+            <span class="text-accent/70 text-xs whitespace-nowrap mt-0.5">[${_lsFormatTime(row.start)}]</span>
+            <span class="text-gray-300">${esc(row.text)}</span>
+        </div>`).join('');
 
     document.getElementById('ls-preview').classList.remove('hidden');
 }
@@ -248,6 +264,7 @@ async function lsSave() {
             body: JSON.stringify({
                 filename: _lsSelectedFilename,
                 segments: _lsAlignmentResult,
+                granularity: _lsGetGranularity(),
             }),
         });
 

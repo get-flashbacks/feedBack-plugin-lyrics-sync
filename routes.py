@@ -238,13 +238,14 @@ def setup(app: FastAPI, context: dict):
     def ls_save(data: dict):
         """Save synced lyrics into the sloppak manifest for playback display.
 
-        Expects: {"filename": str, "segments": [...]}
+        Expects: {"filename": str, "segments": [...], "granularity": str?}
         Writes a lyrics JSON file and updates the sloppak manifest.
         """
         import sloppak as sloppak_mod
 
         filename = data.get("filename", "")
         segments = data.get("segments", [])
+        granularity = data.get("granularity", "line")
 
         if not filename or not segments:
             return JSONResponse({"error": "filename and segments required"}, 400)
@@ -261,13 +262,33 @@ def setup(app: FastAPI, context: dict):
 
         # Convert alignment segments to the sloppak lyrics format:
         # [{"t": time, "d": duration, "w": word}, ...]
-        # For line-level: each segment becomes one entry with the full line as "w"
+        #
+        # A trailing "+" on `w` is the sloppak-spec line-break marker (docs/
+        # sloppak-hand-editing.md §Lyrics) — the renderer wraps to a new line
+        # right after a syllable/word ending in "+". Without it every song
+        # renders as one unbroken line, since nothing else in lyrics.json
+        # carries line-boundary information.
+        #
+        # `line` granularity: the /align server returns one segment per
+        # line (no `new_line` field — see the demucs-server's own /align
+        # docs), so every entry here already *is* a whole line and gets "+".
+        # `word`/`syllable` granularity: the server flags the FIRST entry of
+        # each line with `new_line: true`; the line-ending entry is instead
+        # the one immediately BEFORE that (or the very last segment overall).
         lyrics_data = []
-        for seg in segments:
+        for i, seg in enumerate(segments):
+            text = seg["text"]
+            is_line_end = (
+                granularity == "line"
+                or i == len(segments) - 1
+                or bool(segments[i + 1].get("new_line"))
+            )
+            if is_line_end and not text.endswith("+"):
+                text = text + "+"
             lyrics_data.append({
                 "t": round(seg["start"], 3),
                 "d": round(seg["end"] - seg["start"], 3),
-                "w": seg["text"],
+                "w": text,
             })
 
         # Write lyrics JSON file
