@@ -248,6 +248,7 @@ async function lsSave() {
             body: JSON.stringify({
                 filename: _lsSelectedFilename,
                 segments: _lsAlignmentResult,
+                granularity: _lsGetGranularity(),
             }),
         });
 
