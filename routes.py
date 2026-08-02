@@ -96,16 +96,41 @@ def setup(app: FastAPI, context: dict):
 
     @app.get("/api/plugins/lyrics_sync/status")
     def ls_status():
-        """Check if alignment server is reachable."""
+        """Check if the alignment server is reachable AND actually ready to
+        align — not just that /health returns 200.
+
+        The demucs-server's /health responds 200 with `status: "ok"` as soon
+        as the process is up, well before its models finish loading — during
+        that window its `warmup` block reports fields like `whisperx:
+        "downloading"`. Treating any 200 as "ready" (the previous behavior)
+        showed a green "Alignment server ready" notice while a request would
+        still hit the server mid-warmup, surfacing as a confusing
+        "Cannot connect to alignment server" once the user actually clicked
+        Align. `/align` needs whisperx (transcription, used for VAD-anchored
+        alignment windows — see the demucs-server's own /align docs) loaded
+        first; per-language aligners load lazily on demand and are not
+        gated on here.
+        """
         url = _get_demucs_server_url()
         if not url:
             return {"available": False, "reason": "No demucs server configured"}
         try:
             import requests
             resp = requests.get(f"{url}/health", timeout=5)
-            if resp.status_code == 200:
-                return {"available": True, "server_url": url}
-            return {"available": False, "reason": f"Server returned {resp.status_code}"}
+            if resp.status_code != 200:
+                return {"available": False, "reason": f"Server returned {resp.status_code}"}
+            body = resp.json()
+            warmup = body.get("warmup") or {}
+            whisperx_state = warmup.get("whisperx")
+            if whisperx_state != "ready":
+                return {
+                    "available": False,
+                    "reason": (
+                        f"Alignment model still loading ({whisperx_state or 'unknown'}) "
+                        "— try again in a moment."
+                    ),
+                }
+            return {"available": True, "server_url": url}
         except Exception as e:
             return {"available": False, "reason": str(e)}
 
