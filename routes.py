@@ -1,8 +1,10 @@
 """Lyrics Sync plugin — generate time-synced LRC from plain text lyrics + vocals stem."""
 
 import json
+import ipaddress
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, Response
@@ -13,6 +15,25 @@ _get_dlc_dir = None
 SLOPPAK_CACHE_DIR = None
 
 
+def _is_approved_demucs_url(url: object) -> bool:
+    """Allow only local/private HTTP(S) Demucs server destinations."""
+    if not isinstance(url, str):
+        return False
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password:
+        return False
+    hostname = parsed.hostname
+    if not hostname or parsed.query or parsed.fragment:
+        return False
+    if hostname.lower() in {"localhost", "host.docker.internal"}:
+        return True
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_private or address.is_link_local
+
+
 def _get_demucs_server_url() -> str | None:
     """Get the configured demucs server URL from config.json."""
     config_file = _config_dir / "config.json"
@@ -20,7 +41,7 @@ def _get_demucs_server_url() -> str | None:
         try:
             cfg = json.loads(config_file.read_text())
             url = cfg.get("demucs_server_url", "")
-            if url:
+            if _is_approved_demucs_url(url):
                 return url.rstrip("/")
         except Exception:
             pass
@@ -116,19 +137,23 @@ def setup(app: FastAPI, context: dict):
             return {"available": False, "reason": "No demucs server configured"}
         try:
             import requests
-            resp = requests.get(f"{url}/health", timeout=5)
+            resp = requests.get(f"{url}/health", timeout=5, allow_redirects=False)
             if resp.status_code != 200:
                 return {"available": False, "reason": f"Server returned {resp.status_code}"}
             body = resp.json()
             warmup = body.get("warmup") or {}
             whisperx_state = warmup.get("whisperx")
             if whisperx_state != "ready":
+                if whisperx_state in {"downloading", "loading", "starting", "warming_up"}:
+                    reason = (
+                        f"Alignment model still loading ({whisperx_state}) "
+                        "— try again in a moment."
+                    )
+                else:
+                    reason = f"Alignment model is not ready ({whisperx_state or 'unknown'})"
                 return {
                     "available": False,
-                    "reason": (
-                        f"Alignment model still loading ({whisperx_state or 'unknown'}) "
-                        "— try again in a moment."
-                    ),
+                    "reason": reason,
                 }
             return {"available": True, "server_url": url}
         except Exception as e:
@@ -177,6 +202,7 @@ def setup(app: FastAPI, context: dict):
                         "granularity": granularity,
                     },
                     timeout=300,
+                    allow_redirects=False,
                 )
 
             if resp.status_code != 200:
