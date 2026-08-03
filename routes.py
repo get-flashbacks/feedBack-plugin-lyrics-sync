@@ -25,7 +25,7 @@ def _is_approved_demucs_url(url: object) -> bool:
     hostname = parsed.hostname
     if not hostname or parsed.query or parsed.fragment:
         return False
-    if hostname.lower() in {"localhost", "host.docker.internal"}:
+    if hostname.lower() == "localhost":
         return True
     try:
         address = ipaddress.ip_address(hostname)
