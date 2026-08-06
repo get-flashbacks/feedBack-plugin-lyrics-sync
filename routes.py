@@ -2,7 +2,7 @@
 
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, Response
@@ -11,6 +11,38 @@ _config_dir = None
 _get_dlc_dir = None
 
 SLOPPAK_CACHE_DIR = None
+
+
+def _safe_dlc_path(dlc: Path, filename: str) -> Path | None:
+    """Resolve `filename` under `dlc` and refuse anything that escapes it.
+
+    `filename` arrives straight from a JSON request body, so it can contain
+    `..` traversal segments or be an absolute path — `dlc / filename`
+    discards `dlc` entirely when `filename` is absolute. Without this guard
+    `_find_vocals_stem`/`ls_save` would read/write files anywhere on disk
+    that happens to be named `*.sloppak`/`*.feedpak`, not just inside the
+    configured DLC folder. Mirrors the containment check core's
+    `lib/dlc_paths._resolve_dlc_path` applies for its own filename-bound
+    handlers (lexical normalization, not symlink-following, so a DLC folder
+    reached through a mounted junction still resolves).
+    """
+    if not filename:
+        return None
+    safe = filename.replace("\\", "/")
+    if "\x00" in safe:
+        return None
+    if (PurePosixPath(safe).is_absolute()
+            or PureWindowsPath(safe).is_absolute()
+            or PureWindowsPath(safe).drive):
+        return None
+    try:
+        root = dlc.resolve()
+        candidate = Path(os.path.normpath(root / safe))
+        if not candidate.is_relative_to(root):
+            return None
+    except (ValueError, OSError):
+        return None
+    return candidate
 
 
 def _get_demucs_server_url() -> str | None:
@@ -35,7 +67,9 @@ def _find_vocals_stem(filename: str) -> Path | None:
     if not dlc:
         return None
 
-    song_path = dlc / filename
+    song_path = _safe_dlc_path(dlc, filename)
+    if song_path is None:
+        return None
     if not sloppak_mod.is_sloppak(song_path):
         return None
 
@@ -254,7 +288,9 @@ def setup(app: FastAPI, context: dict):
         if not dlc:
             return JSONResponse({"error": "DLC folder not configured"}, 400)
 
-        song_path = dlc / filename
+        song_path = _safe_dlc_path(dlc, filename)
+        if song_path is None:
+            return JSONResponse({"error": "Invalid filename"}, 400)
         if not sloppak_mod.is_sloppak(song_path):
             return JSONResponse({"error": "Not a sloppak file"}, 400)
 
