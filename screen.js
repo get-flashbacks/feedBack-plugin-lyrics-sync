@@ -51,20 +51,42 @@ async function lsSearchSongs() {
         return;
     }
 
-    container.innerHTML = withStems.map(s => `
-        <div class="flex items-center gap-3 py-2 px-3 rounded-lg hover:bg-dark-700/50 transition cursor-pointer"
-             onclick="lsSelectSong('${encodeURIComponent(s.filename)}','${esc(s.title).replace(/'/g,"\\'")}','${esc(s.artist).replace(/'/g,"\\'")}')">
-            <div class="flex-1 min-w-0">
-                <span class="text-sm text-white">${esc(s.title)}</span>
-                <span class="text-xs text-gray-500 ml-2">${esc(s.artist)}</span>
-            </div>
-            <span class="text-xs text-gray-600">${s.stem_count} stems</span>
-        </div>
-    `).join('');
+    // Built with createElement + textContent (not an interpolated onclick="")
+    // string: `esc()` only escapes <, >, & for text-node use — it does not
+    // escape quotes, so splicing song title/artist into an HTML attribute
+    // (further nested inside a JS string literal) let a title/artist
+    // containing a `"` or `'` break out and inject arbitrary attributes/
+    // markup. Song metadata comes from imported files (GP/MusicXML tags,
+    // manifest.json, MusicBrainz enrichment) so it isn't trusted input.
+    container.innerHTML = '';
+    for (const s of withStems) {
+        const row = document.createElement('div');
+        row.className = 'flex items-center gap-3 py-2 px-3 rounded-lg hover:bg-dark-700/50 transition cursor-pointer';
+        row.addEventListener('click', () => lsSelectSong(s.filename, s.title, s.artist));
+
+        const info = document.createElement('div');
+        info.className = 'flex-1 min-w-0';
+        const titleEl = document.createElement('span');
+        titleEl.className = 'text-sm text-white';
+        titleEl.textContent = s.title;
+        const artistEl = document.createElement('span');
+        artistEl.className = 'text-xs text-gray-500 ml-2';
+        artistEl.textContent = s.artist;
+        info.appendChild(titleEl);
+        info.appendChild(artistEl);
+
+        const stemsEl = document.createElement('span');
+        stemsEl.className = 'text-xs text-gray-600';
+        stemsEl.textContent = `${s.stem_count} stems`;
+
+        row.appendChild(info);
+        row.appendChild(stemsEl);
+        container.appendChild(row);
+    }
 }
 
-function lsSelectSong(encodedFilename, title, artist) {
-    _lsSelectedFilename = decodeURIComponent(encodedFilename);
+function lsSelectSong(filename, title, artist) {
+    _lsSelectedFilename = filename;
     _lsSelectedTitle = title;
     _lsSelectedArtist = artist;
 
