@@ -540,12 +540,14 @@ def setup(app: FastAPI, context: dict):
         Unlike `/save` (which derives entries from Whisper alignment
         segments), this takes the editor's `{t, d, w}` list verbatim —
         markers ('-' join / '+' line-break) are already encoded into `w`
-        by the client. Validated the same way the sloppak loader itself
-        filters lyrics.json on read (lib/sloppak.py) so a save can't
-        write something the loader would silently drop on the next load:
-        every entry must have a string `w` and finite numeric `t`/`d`;
-        entries with `d <= 0` are dropped; the rest are rounded and
-        sorted by `t`.
+        by the client. Validated *more strictly* than the sloppak loader's
+        own read-side filter (lib/sloppak.py, which only checks `w` is a
+        str and `t`/`d` are int/float — no finiteness check, no `d <= 0`
+        drop, no rounding): every entry here must have a string `w` and
+        finite numeric `t`/`d`; entries with `d <= 0` are dropped; the
+        rest are rounded and sorted by `t`. The extra strictness keeps
+        what a save writes well-formed rather than merely
+        loader-tolerated.
 
         An empty list is a valid save — it clears the lyrics track.
         """
