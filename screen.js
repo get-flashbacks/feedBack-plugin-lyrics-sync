@@ -351,17 +351,15 @@ let _lsEditorSyllables = [];      // [{w, t, d, join, brk}], t/d null = untimed
 let _lsEditorSelectedIndex = -1;
 let _lsEditorHistory = [];        // snapshot stack of _lsEditorSyllables
 let _lsEditorHistoryIndex = -1;
-// Dirty tracking: (generation, index) rather than a plain dirty boolean, so
-// undoing back to exactly the saved snapshot correctly reports clean again.
-// `generation` bumps on every full history reset (a fresh disk-load in
-// lsOpenEditor, or a fresh alignment-seed in lsEditInEditor) — needed
-// because both reset paths land at history index 0, so comparing index
-// alone can't tell "just loaded from disk" (clean) apart from "just
-// re-seeded from an unsaved alignment result" (dirty) when one follows
-// the other, as lsEditInEditor does.
-let _lsEditorGeneration = 0;
-let _lsEditorSavedGeneration = -1;
-let _lsEditorSavedHistoryIndex = -1;
+// Dirty tracking: a serialized snapshot of _lsEditorSyllables as of the
+// last successful load/save, compared by VALUE against the live array.
+// Deliberately content-based rather than tracking a history index —
+// _lsEditorPushHistory caps the undo stack at 50 entries and shifts the
+// oldest snapshot out on overflow, so "index 0" doesn't reliably mean the
+// same thing across a long editing session; comparing content sidesteps
+// that entirely (undoing back to exactly the saved state reports clean
+// again regardless of how much history got evicted in between).
+let _lsEditorSavedSnapshot = null;
 let _lsEditorSource = "";         // lyrics_source of whatever was loaded
 let _lsEditorStems = [];          // [{id, file, url}]
 let _lsEditorDuration = 0;        // best-known song duration (manifest, then <audio>)
@@ -402,13 +400,11 @@ function _lsEditorIsOpen() {
 }
 
 function _lsEditorIsDirty() {
-    return _lsEditorGeneration !== _lsEditorSavedGeneration
-        || _lsEditorHistoryIndex !== _lsEditorSavedHistoryIndex;
+    return JSON.stringify(_lsEditorSyllables) !== _lsEditorSavedSnapshot;
 }
 
 function _lsEditorMarkClean() {
-    _lsEditorSavedGeneration = _lsEditorGeneration;
-    _lsEditorSavedHistoryIndex = _lsEditorHistoryIndex;
+    _lsEditorSavedSnapshot = JSON.stringify(_lsEditorSyllables);
 }
 
 // ── History ──────────────────────────────────────────────────────────────
@@ -449,12 +445,19 @@ function _lsUpdateOpenEditorBtn() {
     if (btn) btn.disabled = !_lsSelectedFilename;
 }
 
+// Returns true if the editor actually (re)loaded, false if it bailed out
+// (no song selected, or the user declined to discard unsaved edits).
+// Callers that chain follow-up work in a .then() — lsEditInEditor seeds
+// the editor from an alignment result right after this resolves — MUST
+// check this and skip their own work on false, or they'd apply that work
+// on top of an editor that never actually reloaded (silently overwriting
+// whatever unsaved state the user just chose to keep).
 async function lsOpenEditor() {
-    if (!_lsSelectedFilename) return;
+    if (!_lsSelectedFilename) return false;
     if (_lsEditorIsOpen() && _lsEditorIsDirty()) {
         const ok = window.confirm(
             'Reloading will discard your unsaved lyrics edits. Continue?');
-        if (!ok) return;
+        if (!ok) return false;
     }
     _lsEditorCacheEls();
     _lsEditorEls.container.classList.remove('hidden');
@@ -483,7 +486,6 @@ async function lsOpenEditor() {
     _lsEditorLoopOn = false;
     _lsEditorHistory = [];
     _lsEditorHistoryIndex = -1;
-    _lsEditorGeneration++;
     _lsEditorPushHistory();
     _lsEditorMarkClean(); // freshly loaded from disk — matches the server, not dirty
 
@@ -496,11 +498,14 @@ async function lsOpenEditor() {
     if (firstUrl) _lsEditorSetAudioSrc(firstUrl);
 
     _lsEditorStartLoop();
+    return true;
 }
 
 function lsEditInEditor() {
     if (!_lsAlignmentResult) return;
-    lsOpenEditor().then(() => {
+    lsOpenEditor().then((opened) => {
+        if (!opened) return; // no song selected, or user kept unsaved edits open
+
         // Seed from the just-computed alignment result rather than what's
         // on disk, using the same "+"-marker rule `/save` applies.
         const granularity = _lsGetGranularity();
@@ -519,9 +524,13 @@ function lsEditInEditor() {
         _lsEditorSource = 'transcribed'; // local badge hint only; not yet saved
         _lsEditorHistory = [];
         _lsEditorHistoryIndex = -1;
-        _lsEditorGeneration++; // new generation, deliberately left dirty vs. the
-        _lsEditorPushHistory(); // disk-loaded state lsOpenEditor() just marked clean —
-        _lsEditorUpdateBadge(); // this is an unsaved alignment result, not what's on disk
+        _lsEditorPushHistory();
+        // Deliberately no _lsEditorMarkClean() here — _lsEditorSavedSnapshot
+        // still holds the disk-loaded content lsOpenEditor() just marked
+        // clean, which differs from this alignment-seeded content, so
+        // _lsEditorIsDirty() correctly reports true: this is an unsaved
+        // alignment result, not what's on disk.
+        _lsEditorUpdateBadge();
         _lsEditorRenderAll();
     });
 }
