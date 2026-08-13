@@ -89,7 +89,16 @@ function lsSelectSong(filename, title, artist) {
     // Editor state (loaded lyrics, undo history, audio src) belongs to
     // whatever song was selected when it was opened — switching songs
     // without closing first would let a save land on the wrong file.
-    if (typeof lsCloseEditor === 'function') lsCloseEditor();
+    // lsCloseEditor() may prompt and refuse to close (unsaved edits); if
+    // it does, abort the switch too, or the editor would stay open while
+    // every other bit of state below moves on to the new song.
+    if (typeof lsCloseEditor === 'function' && !lsCloseEditor()) return;
+
+    // Same hazard for the align/preview flow: _lsAlignmentResult isn't
+    // bound to the song it was computed for, so leaving it live across a
+    // song switch would let "Edit Manually" / "Save to Song" persist the
+    // PREVIOUS song's alignment into the newly selected one.
+    _lsClearAlignmentResult();
 
     _lsSelectedFilename = filename;
     _lsSelectedTitle = title;
@@ -104,7 +113,8 @@ function lsSelectSong(filename, title, artist) {
 }
 
 function lsClearSong() {
-    if (typeof lsCloseEditor === 'function') lsCloseEditor();
+    if (typeof lsCloseEditor === 'function' && !lsCloseEditor()) return;
+    _lsClearAlignmentResult();
 
     _lsSelectedFilename = null;
     _lsSelectedTitle = "";
@@ -113,6 +123,11 @@ function lsClearSong() {
     document.getElementById('ls-selected-label').textContent = '';
     _lsUpdateAlignBtn();
     if (typeof _lsUpdateOpenEditorBtn === 'function') _lsUpdateOpenEditorBtn();
+}
+
+function _lsClearAlignmentResult() {
+    _lsAlignmentResult = null;
+    document.getElementById('ls-preview')?.classList.add('hidden');
 }
 
 // ── Lyrics input ─────────────────────────────────────────────────────────
@@ -336,6 +351,17 @@ let _lsEditorSyllables = [];      // [{w, t, d, join, brk}], t/d null = untimed
 let _lsEditorSelectedIndex = -1;
 let _lsEditorHistory = [];        // snapshot stack of _lsEditorSyllables
 let _lsEditorHistoryIndex = -1;
+// Dirty tracking: (generation, index) rather than a plain dirty boolean, so
+// undoing back to exactly the saved snapshot correctly reports clean again.
+// `generation` bumps on every full history reset (a fresh disk-load in
+// lsOpenEditor, or a fresh alignment-seed in lsEditInEditor) — needed
+// because both reset paths land at history index 0, so comparing index
+// alone can't tell "just loaded from disk" (clean) apart from "just
+// re-seeded from an unsaved alignment result" (dirty) when one follows
+// the other, as lsEditInEditor does.
+let _lsEditorGeneration = 0;
+let _lsEditorSavedGeneration = -1;
+let _lsEditorSavedHistoryIndex = -1;
 let _lsEditorSource = "";         // lyrics_source of whatever was loaded
 let _lsEditorStems = [];          // [{id, file, url}]
 let _lsEditorDuration = 0;        // best-known song duration (manifest, then <audio>)
@@ -373,6 +399,16 @@ function _lsEncodeSyllable(syl) {
 
 function _lsEditorIsOpen() {
     return !!(_lsEditorEls.container && !_lsEditorEls.container.classList.contains('hidden'));
+}
+
+function _lsEditorIsDirty() {
+    return _lsEditorGeneration !== _lsEditorSavedGeneration
+        || _lsEditorHistoryIndex !== _lsEditorSavedHistoryIndex;
+}
+
+function _lsEditorMarkClean() {
+    _lsEditorSavedGeneration = _lsEditorGeneration;
+    _lsEditorSavedHistoryIndex = _lsEditorHistoryIndex;
 }
 
 // ── History ──────────────────────────────────────────────────────────────
@@ -415,6 +451,11 @@ function _lsUpdateOpenEditorBtn() {
 
 async function lsOpenEditor() {
     if (!_lsSelectedFilename) return;
+    if (_lsEditorIsOpen() && _lsEditorIsDirty()) {
+        const ok = window.confirm(
+            'Reloading will discard your unsaved lyrics edits. Continue?');
+        if (!ok) return;
+    }
     _lsEditorCacheEls();
     _lsEditorEls.container.classList.remove('hidden');
 
@@ -442,7 +483,9 @@ async function lsOpenEditor() {
     _lsEditorLoopOn = false;
     _lsEditorHistory = [];
     _lsEditorHistoryIndex = -1;
+    _lsEditorGeneration++;
     _lsEditorPushHistory();
+    _lsEditorMarkClean(); // freshly loaded from disk — matches the server, not dirty
 
     _lsEditorPopulateStemSelect();
     _lsEditorUpdateBadge();
@@ -476,13 +519,24 @@ function lsEditInEditor() {
         _lsEditorSource = 'transcribed'; // local badge hint only; not yet saved
         _lsEditorHistory = [];
         _lsEditorHistoryIndex = -1;
-        _lsEditorPushHistory();
-        _lsEditorUpdateBadge();
+        _lsEditorGeneration++; // new generation, deliberately left dirty vs. the
+        _lsEditorPushHistory(); // disk-loaded state lsOpenEditor() just marked clean —
+        _lsEditorUpdateBadge(); // this is an unsaved alignment result, not what's on disk
         _lsEditorRenderAll();
     });
 }
 
+// Returns true if the editor is now closed (or wasn't open), false if the
+// user was prompted about unsaved edits and chose to keep it open — callers
+// that are about to replace the editor's context (switching songs,
+// navigating away) MUST check this and abort their own action on false, or
+// they'd leave the editor open while pointing at stale state.
 function lsCloseEditor() {
+    if (_lsEditorIsOpen() && _lsEditorIsDirty()) {
+        const ok = window.confirm(
+            'You have unsaved lyrics edits. Discard them?');
+        if (!ok) return false;
+    }
     _lsEditorStopLoop();
     _lsEditorStopTapMode();
     const audio = _lsEditorEls.audio;
@@ -492,6 +546,7 @@ function lsCloseEditor() {
         audio.load();
     }
     if (_lsEditorEls.container) _lsEditorEls.container.classList.add('hidden');
+    return true;
 }
 
 function _lsEditorUpdateBadge() {
@@ -1164,6 +1219,23 @@ function _lsEditorRenderAll() {
 
 async function lsEditorSave() {
     if (!_lsSelectedFilename) return;
+
+    // The server treats an empty list as a valid "clear the track" save.
+    // If every syllable is still untimed (e.g. text was just seeded via
+    // "Add" and nothing has been tapped/dragged yet), `payload` filters
+    // down to [] and this would silently wipe whatever's already saved —
+    // with the seeded text gone from the textarea, unrecoverable in the
+    // UI. Confirm before letting that combination through.
+    const timed = _lsEditorSyllables.filter((s) => s.t != null && s.d != null);
+    const untimedCount = _lsEditorSyllables.length - timed.length;
+    const payload = timed.map(_lsEncodeSyllable);
+    if (payload.length === 0 && _lsEditorSyllables.length > 0) {
+        const ok = window.confirm(
+            `All ${_lsEditorSyllables.length} syllable(s) are untimed and would be skipped — ` +
+            'saving now clears any lyrics already on this song. Continue?');
+        if (!ok) return;
+    }
+
     const btn = _lsEditorEls.saveBtn;
     const statusEl = _lsEditorEls.saveStatus;
     if (btn) btn.disabled = true;
@@ -1172,10 +1244,6 @@ async function lsEditorSave() {
         statusEl.className = 'text-xs text-gray-400';
         statusEl.classList.remove('hidden');
     }
-
-    const timed = _lsEditorSyllables.filter((s) => s.t != null && s.d != null);
-    const untimedCount = _lsEditorSyllables.length - timed.length;
-    const payload = timed.map(_lsEncodeSyllable);
 
     try {
         const resp = await fetch('/api/plugins/lyrics_sync/save-lyrics', {
@@ -1190,6 +1258,7 @@ async function lsEditorSave() {
             if (statusEl) { statusEl.textContent = msg; statusEl.className = 'text-xs text-green-400'; }
             _lsEditorSource = 'user';
             _lsEditorUpdateBadge();
+            _lsEditorMarkClean();
         } else {
             if (statusEl) { statusEl.textContent = `Error: ${data.error}`; statusEl.className = 'text-xs text-red-400'; }
         }
@@ -1250,7 +1319,10 @@ async function lsEditorSave() {
         if (id !== 'plugin-lyrics_sync' && _lsEditorIsOpen()) {
             // Leaving the screen: stop the rAF loop and any in-progress tap
             // session rather than letting them run against a hidden screen.
-            lsCloseEditor();
+            // lsCloseEditor() prompts and can refuse (unsaved edits) — when
+            // it does, stay on this screen instead of navigating away and
+            // leaving the editor open-but-hidden with an active rAF loop.
+            if (!lsCloseEditor()) return;
         }
         origShowScreen(id);
         if (id === 'plugin-lyrics_sync') lsLoadDashboard();
