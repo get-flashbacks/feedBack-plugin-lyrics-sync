@@ -1,7 +1,7 @@
 {
   "id": "lyrics_sync",
   "name": "Lyrics Sync",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": false,
   "nav": {
     "label": "Lyrics Sync",
