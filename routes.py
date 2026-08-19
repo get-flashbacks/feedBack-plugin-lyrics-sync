@@ -270,6 +270,8 @@ def setup(app: FastAPI, context: dict):
         # Quote-escape for the legacy `filename=` fallback, and provide an
         # RFC 5987 `filename*=` form so non-ASCII / quote characters in
         # title-artist can't corrupt or break out of the header value.
+        # The `\` escape is a no-op today (safe_name already stripped `\`
+        # above) but guards this line if that stripping ever changes.
         ascii_name = safe_name.replace("\\", "\\\\").replace('"', '\\"')
         encoded_name = quote(f"{safe_name}.lrc", safe="")
 
