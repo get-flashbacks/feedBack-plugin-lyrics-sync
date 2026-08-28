@@ -354,7 +354,13 @@ def setup(app: FastAPI, context: dict):
                     502,
                 )
 
-            result = resp.json()
+            try:
+                result = resp.json()
+            except ValueError:
+                return JSONResponse(
+                    {"error": "Alignment server returned a malformed response"},
+                    502,
+                )
             if "error" in result:
                 return JSONResponse(
                     {"error": f"Alignment failed: {result['error']}"},
@@ -395,11 +401,22 @@ def setup(app: FastAPI, context: dict):
         safe_name = f"{artist} - {title}".strip(" -") or "lyrics"
         safe_name = safe_name.replace("/", "_").replace("\\", "_")
 
+        # Quote-escape for the legacy `filename=` fallback, and provide an
+        # RFC 5987 `filename*=` form so non-ASCII / quote characters in
+        # title-artist can't corrupt or break out of the header value.
+        # The `\` escape is a no-op today (safe_name already stripped `\`
+        # above) but guards this line if that stripping ever changes.
+        ascii_name = safe_name.replace("\\", "\\\\").replace('"', '\\"')
+        encoded_name = quote(f"{safe_name}.lrc", safe="")
+
         return Response(
             content=lrc,
             media_type="text/plain",
             headers={
-                "Content-Disposition": f'attachment; filename="{safe_name}.lrc"',
+                "Content-Disposition": (
+                    f'attachment; filename="{ascii_name}.lrc"; '
+                    f"filename*=UTF-8''{encoded_name}"
+                ),
             },
         )
 
