@@ -1,10 +1,13 @@
-"""Lyrics Sync plugin — generate time-synced LRC from plain text lyrics + vocals stem."""
+"""Lyrics Sync plugin — author, time-align, and hand-edit synced lyrics."""
 
 import json
 import os
+import shutil
+import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import quote
 
+import yaml
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, Response
 
@@ -20,7 +23,7 @@ def _safe_dlc_path(dlc: Path, filename: str) -> Path | None:
     `filename` arrives straight from a JSON request body, so it can contain
     `..` traversal segments or be an absolute path — `dlc / filename`
     discards `dlc` entirely when `filename` is absolute. Without this guard
-    `_find_vocals_stem`/`ls_save` would read/write files anywhere on disk
+    `_find_vocals_stem`/save handlers would read/write files anywhere on disk
     that happens to be named `*.sloppak`/`*.feedpak`, not just inside the
     configured DLC folder. Mirrors the containment check core's
     `lib/dlc_paths._resolve_dlc_path` applies for its own filename-bound
@@ -46,6 +49,86 @@ def _safe_dlc_path(dlc: Path, filename: str) -> Path | None:
     return candidate
 
 
+def _safe_source_path(source_dir: Path, rel: str) -> Path | None:
+    """Resolve a manifest-declared relative path under `source_dir`,
+    refusing anything that escapes it.
+
+    Manifest content (`stems[].file`, `lyrics`) is untrusted — it comes from
+    inside a `.sloppak`/`.feedpak` package that may have been authored or
+    shared by someone other than the library owner. Without this check,
+    `source_dir / rel` has two failure modes: an absolute `rel` (e.g.
+    `/etc/passwd`) silently discards `source_dir` entirely (a pathlib
+    quirk), and a `rel` containing `..` walks out of the pack directory.
+    Either lets a crafted pack make this plugin read an arbitrary local
+    file — and for the vocals stem, upload its bytes to the configured
+    alignment/demucs server.
+    """
+    if not rel:
+        return None
+    safe = str(rel).replace("\\", "/")
+    if "\x00" in safe:
+        return None
+    if (PurePosixPath(safe).is_absolute()
+            or PureWindowsPath(safe).is_absolute()
+            or PureWindowsPath(safe).drive):
+        return None
+    try:
+        root = source_dir.resolve()
+        candidate = Path(os.path.normpath(root / safe))
+        if not candidate.is_relative_to(root):
+            return None
+    except (ValueError, OSError):
+        return None
+    return candidate
+
+
+# ── Manifest helpers ────────────────────────────────────────────────────────
+
+def _manifest_path(source_dir: Path) -> Path:
+    p = source_dir / "manifest.yaml"
+    if not p.exists():
+        alt = source_dir / "manifest.yml"
+        if alt.exists():
+            return alt
+    return p
+
+
+def _read_manifest(source_dir: Path) -> dict:
+    mp = _manifest_path(source_dir)
+    return yaml.safe_load(mp.read_text(encoding="utf-8")) or {}
+
+
+def _write_manifest(source_dir: Path, manifest: dict) -> None:
+    mp = _manifest_path(source_dir)
+    mp.write_text(
+        yaml.safe_dump(manifest, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+
+def _resolve_sloppak(filename: str):
+    """Resolve a sloppak filename to its source dir, manifest, and zip flag.
+
+    Returns `(source_dir, manifest, dlc_path, is_zip)` or `None` when the
+    target is missing or isn't a sloppak.
+    """
+    import sloppak as sloppak_mod
+
+    if not filename:
+        return None
+    dlc = _get_dlc_dir() if _get_dlc_dir else None
+    if not dlc:
+        return None
+    dlc_path = _safe_dlc_path(dlc, filename)
+    if dlc_path is None or not dlc_path.exists():
+        return None
+    if not sloppak_mod.is_sloppak(dlc_path):
+        return None
+    source_dir = sloppak_mod.resolve_source_dir(filename, dlc, SLOPPAK_CACHE_DIR)
+    manifest = _read_manifest(source_dir)
+    return source_dir, manifest, dlc_path, dlc_path.is_file()
+
+
 def _get_demucs_server_url() -> str | None:
     """Get the configured demucs server URL from config.json."""
     config_file = _config_dir / "config.json"
@@ -62,30 +145,21 @@ def _get_demucs_server_url() -> str | None:
 
 def _find_vocals_stem(filename: str) -> Path | None:
     """Find the vocals stem file for a sloppak song."""
-    import sloppak as sloppak_mod
-
-    dlc = _get_dlc_dir()
-    if not dlc:
+    resolved = _resolve_sloppak(filename)
+    if resolved is None:
         return None
-
-    song_path = _safe_dlc_path(dlc, filename)
-    if song_path is None:
-        return None
-    if not sloppak_mod.is_sloppak(song_path):
-        return None
-
-    source_dir = sloppak_mod.resolve_source_dir(filename, dlc, SLOPPAK_CACHE_DIR)
-    manifest = sloppak_mod.load_manifest(song_path)
+    source_dir, manifest, _dlc_path, _is_zip = resolved
 
     for s in manifest.get("stems", []) or []:
         if not isinstance(s, dict):
             continue
         sid = str(s.get("id", "")).lower()
         sfile = str(s.get("file", ""))
-        if sid == "vocals" and sfile:
-            vocals_path = source_dir / sfile
-            if vocals_path.exists():
-                return vocals_path
+        if sid != "vocals" or not sfile:
+            continue
+        vocals_path = _safe_source_path(source_dir, sfile)
+        if vocals_path is not None and vocals_path.exists():
+            return vocals_path
     return None
 
 
@@ -119,6 +193,66 @@ def _format_lrc_word_level(segments: list[dict]) -> str:
             text = " ".join(word_parts)
         lines.append(f"[{minutes:02d}:{seconds:05.2f}]{text}")
     return "\n".join(lines) + "\n"
+
+
+# ── Persistence: write lyrics.json + patch manifest + re-zip ──────────────────
+
+def _atomic_write_json(path: Path, payload) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _rezip_sloppak(source_dir: Path, output_path: Path) -> None:
+    """Replace the zip-form sloppak with the contents of source_dir.
+
+    Keeps a one-time `.bak` of the original next to it so a botched run
+    is recoverable. Writes via `.tmp` + atomic replace so a crash mid-zip
+    doesn't leave a half-written archive.
+    """
+    if output_path.exists() and output_path.is_file():
+        backup = output_path.with_suffix(output_path.suffix + ".bak")
+        if not backup.exists():
+            shutil.copy2(output_path, backup)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_zip = output_path.with_suffix(output_path.suffix + ".tmp")
+    if tmp_zip.exists():
+        tmp_zip.unlink()
+    with zipfile.ZipFile(str(tmp_zip), "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in source_dir.rglob("*"):
+            if f.is_file():
+                zf.write(f, f.relative_to(source_dir).as_posix())
+    tmp_zip.replace(output_path)
+
+
+def _persist_lyrics(
+    source_dir: Path,
+    manifest: dict,
+    lyrics_data: list[dict],
+    dlc_path: Path,
+    is_zip: bool,
+    source: str = "user",
+) -> int:
+    """Write `lyrics_data` to `lyrics.json`, patch the manifest, and (for
+    zip-form packs) re-zip so the edit reaches the distributable `.sloppak`
+    file rather than only the extraction cache.
+
+    An empty `lyrics_data` list is valid — it's how a track gets cleared —
+    and is still written and manifest-patched like any other save.
+
+    Returns the number of lyric entries written.
+    """
+    _atomic_write_json(source_dir / "lyrics.json", lyrics_data)
+
+    if manifest.get("lyrics") != "lyrics.json" or manifest.get("lyrics_source") != source:
+        manifest["lyrics"] = "lyrics.json"
+        manifest["lyrics_source"] = source
+        _write_manifest(source_dir, manifest)
+
+    if is_zip:
+        _rezip_sloppak(source_dir, dlc_path)
+
+    return len(lyrics_data)
 
 
 def setup(app: FastAPI, context: dict):
@@ -288,13 +422,14 @@ def setup(app: FastAPI, context: dict):
 
     @app.post("/api/plugins/lyrics_sync/save")
     def ls_save(data: dict):
-        """Save synced lyrics into the sloppak manifest for playback display.
+        """Save aligned lyrics into the sloppak for playback display.
 
         Expects: {"filename": str, "segments": [...], "granularity": str?}
-        Writes a lyrics JSON file and updates the sloppak manifest.
+        Converts Whisper alignment segments to the sloppak lyrics format and
+        persists via `_persist_lyrics` — directory-form packs are rewritten
+        in place; zip-form packs are re-zipped so the edit lands in the
+        distributable `.sloppak` file, not just the extraction cache.
         """
-        import sloppak as sloppak_mod
-
         filename = data.get("filename", "")
         segments = data.get("segments", [])
         granularity = data.get("granularity", "line")
@@ -302,17 +437,10 @@ def setup(app: FastAPI, context: dict):
         if not filename or not segments:
             return JSONResponse({"error": "filename and segments required"}, 400)
 
-        dlc = _get_dlc_dir()
-        if not dlc:
-            return JSONResponse({"error": "DLC folder not configured"}, 400)
-
-        song_path = _safe_dlc_path(dlc, filename)
-        if song_path is None:
-            return JSONResponse({"error": "Invalid filename"}, 400)
-        if not sloppak_mod.is_sloppak(song_path):
-            return JSONResponse({"error": "Not a sloppak file"}, 400)
-
-        source_dir = sloppak_mod.resolve_source_dir(filename, dlc, SLOPPAK_CACHE_DIR)
+        resolved = _resolve_sloppak(filename)
+        if resolved is None:
+            return JSONResponse({"error": "Not a sloppak"}, 400)
+        source_dir, manifest, dlc_path, is_zip = resolved
 
         # Convert alignment segments to the sloppak lyrics format:
         # [{"t": time, "d": duration, "w": word}, ...]
@@ -345,27 +473,139 @@ def setup(app: FastAPI, context: dict):
                 "w": text,
             })
 
-        # Write lyrics JSON file
-        lyrics_path = source_dir / "lyrics.json"
-        lyrics_path.write_text(json.dumps(lyrics_data, indent=2), encoding="utf-8")
+        try:
+            count = _persist_lyrics(source_dir, manifest, lyrics_data, dlc_path, is_zip)
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"error": f"Persist failed: {exc}"}, 500)
 
-        # Update manifest to reference the lyrics file
-        manifest_path = source_dir / "manifest.yaml"
-        if manifest_path.exists():
+        return {"ok": True, "lyrics_count": count}
+
+    @app.get("/api/plugins/lyrics_sync/lyrics")
+    def ls_get_lyrics(filename: str = ""):
+        """Load a sloppak's existing lyrics + audio info for the editor.
+
+        Returns: {ok, lyrics: [{t,d,w}], source, duration,
+                   stems: [{id, file, url}]}
+        """
+        resolved = _resolve_sloppak(filename)
+        if resolved is None:
+            return JSONResponse({"error": "Not a sloppak"}, 400)
+        source_dir, manifest, _dlc_path, _is_zip = resolved
+
+        lyrics: list[dict] = []
+        rel = manifest.get("lyrics")
+        if rel:
+            p = _safe_source_path(source_dir, str(rel))
+            if p is not None and p.exists():
+                try:
+                    raw = json.loads(p.read_text(encoding="utf-8"))
+                except Exception:
+                    raw = None
+                if isinstance(raw, list):
+                    for item in raw:
+                        if not isinstance(item, dict):
+                            continue
+                        try:
+                            t = float(item.get("t", 0.0))
+                            d = float(item.get("d", 0.0))
+                        except (TypeError, ValueError):
+                            continue
+                        lyrics.append({"t": t, "d": d, "w": str(item.get("w", ""))})
+
+        raw_source = manifest.get("lyrics_source")
+        source = raw_source if isinstance(raw_source, str) else ""
+
+        # Stem URLs use the same core-served endpoint (and the same
+        # encoding) that the highway WebSocket hands the player —
+        # `/api/sloppak/{filename}/file/{rel_path}` (lib/routers/media.py).
+        # Building the URL here means the editor never has to duplicate
+        # this encoding logic client-side.
+        q_fn = quote(filename, safe="")
+        stems = []
+        for s in manifest.get("stems", []) or []:
+            if not isinstance(s, dict):
+                continue
+            sid = str(s.get("id", ""))
+            sfile = str(s.get("file", ""))
+            if sid and sfile:
+                stems.append({
+                    "id": sid,
+                    "file": sfile,
+                    "url": f"/api/sloppak/{q_fn}/file/{quote(sfile)}",
+                })
+
+        duration = manifest.get("duration")
+        try:
+            duration = float(duration) if duration is not None else None
+        except (TypeError, ValueError):
+            duration = None
+
+        return {
+            "ok": True,
+            "lyrics": lyrics,
+            "source": source,
+            "duration": duration,
+            "stems": stems,
+        }
+
+    @app.post("/api/plugins/lyrics_sync/save-lyrics")
+    def ls_save_lyrics(data: dict):
+        """Persist hand-edited lyrics from the editor.
+
+        Expects: {"filename": str, "lyrics": [{"t": float, "d": float, "w": str}, ...]}
+
+        Unlike `/save` (which derives entries from Whisper alignment
+        segments), this takes the editor's `{t, d, w}` list verbatim —
+        markers ('-' join / '+' line-break) are already encoded into `w`
+        by the client. Validated *more strictly* than the sloppak loader's
+        own read-side filter (lib/sloppak.py, which only checks `w` is a
+        str and `t`/`d` are int/float — no finiteness check, no `d <= 0`
+        drop, no rounding): every entry here must have a string `w` and
+        finite numeric `t`/`d`; entries with `d <= 0` are dropped; the
+        rest are rounded and sorted by `t`. The extra strictness keeps
+        what a save writes well-formed rather than merely
+        loader-tolerated.
+
+        An empty list is a valid save — it clears the lyrics track.
+        """
+        filename = data.get("filename", "")
+        raw_lyrics = data.get("lyrics", [])
+
+        if not filename:
+            return JSONResponse({"error": "filename required"}, 400)
+        if not isinstance(raw_lyrics, list):
+            return JSONResponse({"error": "lyrics must be a list"}, 400)
+
+        import math
+
+        lyrics_data = []
+        for item in raw_lyrics:
+            if not isinstance(item, dict):
+                continue
+            w = item.get("w")
+            if not isinstance(w, str):
+                continue
             try:
-                import yaml
-            except ImportError:
-                # Fallback: read and patch YAML manually
-                text = manifest_path.read_text(encoding="utf-8")
-                if "lyrics:" not in text:
-                    text = text.rstrip() + "\nlyrics: lyrics.json\n"
-                    manifest_path.write_text(text, encoding="utf-8")
-            else:
-                manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
-                manifest["lyrics"] = "lyrics.json"
-                manifest_path.write_text(
-                    yaml.dump(manifest, default_flow_style=False, allow_unicode=True),
-                    encoding="utf-8",
-                )
+                t = float(item.get("t"))
+                d = float(item.get("d"))
+            except (TypeError, ValueError):
+                continue
+            if not (math.isfinite(t) and math.isfinite(d)):
+                continue
+            if d <= 0:
+                continue
+            lyrics_data.append({"t": round(t, 3), "d": round(d, 3), "w": w})
 
-        return {"ok": True, "lyrics_count": len(lyrics_data)}
+        lyrics_data.sort(key=lambda e: e["t"])
+
+        resolved = _resolve_sloppak(filename)
+        if resolved is None:
+            return JSONResponse({"error": "Not a sloppak"}, 400)
+        source_dir, manifest, dlc_path, is_zip = resolved
+
+        try:
+            count = _persist_lyrics(source_dir, manifest, lyrics_data, dlc_path, is_zip)
+        except Exception as exc:  # noqa: BLE001
+            return JSONResponse({"error": f"Persist failed: {exc}"}, 500)
+
+        return {"ok": True, "lyrics_count": count}
