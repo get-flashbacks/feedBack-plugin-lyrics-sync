@@ -1,6 +1,7 @@
 """Lyrics Sync plugin — author, time-align, and hand-edit synced lyrics."""
 
 import json
+import math
 import os
 import re
 import shutil
@@ -212,6 +213,8 @@ def _format_lrc(segments: list[dict]) -> str:
             t = float(seg["start"])
         except (KeyError, TypeError, ValueError):
             continue
+        if not math.isfinite(t):
+            continue
         lines.append(f"[{_lrc_timestamp(t)}]{seg.get('text', '')}")
     return "\n".join(lines) + "\n"
 
@@ -226,9 +229,11 @@ def _format_lrc_word_level(segments: list[dict]) -> str:
             t = float(seg["start"])
         except (KeyError, TypeError, ValueError):
             continue
+        if not math.isfinite(t):
+            continue
         text = seg.get("text", "")
         # Word-level: include inline timestamps for each word
-        if "words" in seg:
+        if isinstance(seg.get("words"), list):
             word_parts = []
             for w in seg["words"]:
                 if not isinstance(w, dict):
@@ -236,6 +241,8 @@ def _format_lrc_word_level(segments: list[dict]) -> str:
                 try:
                     wt = float(w["start"])
                 except (KeyError, TypeError, ValueError):
+                    continue
+                if not math.isfinite(wt):
                     continue
                 word_parts.append(f"<{_lrc_timestamp(wt)}>{w.get('text', '')}")
             text = " ".join(word_parts)
@@ -503,10 +510,12 @@ def setup(app: FastAPI, context: dict):
             if not isinstance(seg.get("text"), str):
                 return JSONResponse({"error": f"segment {i} is missing a string 'text'"}, 400)
             try:
-                float(seg["start"])
-                float(seg["end"])
+                seg_start = float(seg["start"])
+                seg_end = float(seg["end"])
             except (KeyError, TypeError, ValueError):
                 return JSONResponse({"error": f"segment {i} has a non-numeric start/end"}, 400)
+            if not (math.isfinite(seg_start) and math.isfinite(seg_end)):
+                return JSONResponse({"error": f"segment {i} has a non-finite start/end"}, 400)
 
         resolved = _resolve_sloppak(filename)
         if resolved is None:
@@ -646,8 +655,6 @@ def setup(app: FastAPI, context: dict):
             return JSONResponse({"error": "filename required"}, 400)
         if not isinstance(raw_lyrics, list):
             return JSONResponse({"error": "lyrics must be a list"}, 400)
-
-        import math
 
         lyrics_data = []
         for item in raw_lyrics:
