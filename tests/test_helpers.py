@@ -273,3 +273,42 @@ def test_format_lrc_word_level_skips_malformed_words():
     ]
     lrc = routes._format_lrc_word_level(segments)
     assert lrc == "[00:00.00]<00:00.00>Hello <00:00.50>World\n"
+
+
+def test_format_lrc_word_level_tolerates_null_words_field():
+    # "words": null iterated directly (`for w in seg["words"]`) raises
+    # TypeError outside any try/except -- a 500 on otherwise well-formed
+    # input. `isinstance(seg.get("words"), list)` must reject None the
+    # same way it rejects any other non-list shape.
+    segments = [{"start": 0.0, "text": "Hello", "words": None}]
+    assert routes._format_lrc_word_level(segments) == "[00:00.00]Hello\n"
+
+
+def test_format_lrc_skips_non_finite_start_instead_of_raising():
+    # float("inf")/float("nan") parse without raising, so the existing
+    # KeyError/TypeError/ValueError guard doesn't catch them -- they used
+    # to reach _lrc_timestamp's `round(inf * 100)`, which raises
+    # OverflowError ("cannot convert float infinity to integer") and 500s
+    # the export. Same for the numeric-literal overflow case (1e999 is inf).
+    segments = [
+        {"start": 1.0, "text": "kept"},
+        {"start": float("inf"), "text": "inf dropped"},
+        {"start": float("-inf"), "text": "-inf dropped"},
+        {"start": float("nan"), "text": "nan dropped"},
+        {"start": 1e999, "text": "overflow-literal dropped"},
+    ]
+    assert routes._format_lrc(segments) == "[00:01.00]kept\n"
+
+
+def test_format_lrc_word_level_skips_non_finite_start_and_word_start():
+    segments = [
+        {"start": float("inf"), "text": "seg dropped", "words": [
+            {"start": 0.0, "text": "irrelevant"},
+        ]},
+        {"start": 0.0, "text": "kept", "words": [
+            {"start": float("nan"), "text": "word dropped"},
+            {"start": 0.5, "text": "kept-word"},
+        ]},
+    ]
+    lrc = routes._format_lrc_word_level(segments)
+    assert lrc == "[00:00.00]<00:00.50>kept-word\n"
