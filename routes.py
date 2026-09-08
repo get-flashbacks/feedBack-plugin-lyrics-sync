@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -163,14 +164,55 @@ def _find_vocals_stem(filename: str) -> Path | None:
     return None
 
 
+def _ascii_safe_filename_component(name: str) -> str:
+    """Fold `name` to printable ASCII for use in the legacy `filename=`
+    Content-Disposition fallback.
+
+    Starlette/Werkzeug-style header encoding treats header VALUES as
+    Latin-1 (RFC 7230), so any character above U+00FF (CJK, Cyrillic,
+    emoji, ...) raises UnicodeEncodeError at response-send time if it
+    reaches that header raw — turning a perfectly ordinary title/artist
+    into a 500. The `filename*=` RFC 5987 form (built separately, from the
+    unfolded name) still carries the real UTF-8 name via percent-encoding
+    regardless, so this fallback only needs to be non-crashing, not exact.
+    """
+    return re.sub(r"[^\x20-\x7e]", "_", name)
+
+
+def _lrc_timestamp(t: float) -> str:
+    """Format a time in seconds as an LRC "mm:ss.xx" timestamp.
+
+    Computing minutes/seconds separately with `int(t // 60)` /
+    `f"{t % 60:05.2f}"` looks right but isn't: `:05.2f` rounds its operand,
+    so a seconds remainder like 59.996 prints as "60.00" instead of rolling
+    into the next minute — e.g. t=119.999 produced the invalid
+    "[01:60.00]" rather than "[02:00.00]". Round to whole centiseconds
+    FIRST, then split into minutes/seconds, so the rollover happens before
+    formatting rather than during it.
+    """
+    total_centis = round(max(0.0, float(t)) * 100)
+    minutes, centis = divmod(total_centis, 6000)
+    return f"{minutes:02d}:{centis / 100:05.2f}"
+
+
 def _format_lrc(segments: list[dict]) -> str:
-    """Convert alignment segments to standard LRC format."""
+    """Convert alignment segments to standard LRC format.
+
+    Segments come from the alignment server's JSON response (or, for
+    /export, straight from the request body) — parseable JSON, but not
+    guaranteed to carry the keys this needs. A malformed segment (missing
+    `start`, a non-numeric `start`) is skipped rather than raising
+    KeyError/TypeError and 500ing the whole export.
+    """
     lines = []
     for seg in segments:
-        t = seg["start"]
-        minutes = int(t // 60)
-        seconds = t % 60
-        lines.append(f"[{minutes:02d}:{seconds:05.2f}]{seg['text']}")
+        if not isinstance(seg, dict):
+            continue
+        try:
+            t = float(seg["start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        lines.append(f"[{_lrc_timestamp(t)}]{seg.get('text', '')}")
     return "\n".join(lines) + "\n"
 
 
@@ -178,20 +220,26 @@ def _format_lrc_word_level(segments: list[dict]) -> str:
     """Convert word-level alignment segments to enhanced LRC format."""
     lines = []
     for seg in segments:
-        t = seg["start"]
-        minutes = int(t // 60)
-        seconds = t % 60
-        text = seg["text"]
+        if not isinstance(seg, dict):
+            continue
+        try:
+            t = float(seg["start"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        text = seg.get("text", "")
         # Word-level: include inline timestamps for each word
         if "words" in seg:
             word_parts = []
             for w in seg["words"]:
-                wt = w["start"]
-                wm = int(wt // 60)
-                ws = wt % 60
-                word_parts.append(f"<{wm:02d}:{ws:05.2f}>{w['text']}")
+                if not isinstance(w, dict):
+                    continue
+                try:
+                    wt = float(w["start"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                word_parts.append(f"<{_lrc_timestamp(wt)}>{w.get('text', '')}")
             text = " ".join(word_parts)
-        lines.append(f"[{minutes:02d}:{seconds:05.2f}]{text}")
+        lines.append(f"[{_lrc_timestamp(t)}]{text}")
     return "\n".join(lines) + "\n"
 
 
@@ -381,11 +429,11 @@ def setup(app: FastAPI, context: dict):
         Returns: LRC file download.
         """
         segments = data.get("segments", [])
-        if not segments:
+        if not isinstance(segments, list) or not segments:
             return JSONResponse({"error": "No segments provided"}, 400)
 
-        title = data.get("title", "")
-        artist = data.get("artist", "")
+        title = data.get("title", "") if isinstance(data.get("title", ""), str) else ""
+        artist = data.get("artist", "") if isinstance(data.get("artist", ""), str) else ""
 
         # Build LRC header + body
         header_lines = []
@@ -406,7 +454,11 @@ def setup(app: FastAPI, context: dict):
         # title-artist can't corrupt or break out of the header value.
         # The `\` escape is a no-op today (safe_name already stripped `\`
         # above) but guards this line if that stripping ever changes.
-        ascii_name = safe_name.replace("\\", "\\\\").replace('"', '\\"')
+        # _ascii_safe_filename_component folds anything outside printable
+        # ASCII to `_` in the legacy fallback only; `filename*=` below still
+        # carries the real UTF-8 name via percent-encoding regardless.
+        ascii_safe_name = _ascii_safe_filename_component(safe_name)
+        ascii_name = ascii_safe_name.replace("\\", "\\\\").replace('"', '\\"')
         encoded_name = quote(f"{safe_name}.lrc", safe="")
 
         return Response(
@@ -436,6 +488,25 @@ def setup(app: FastAPI, context: dict):
 
         if not filename or not segments:
             return JSONResponse({"error": "filename and segments required"}, 400)
+        if not isinstance(segments, list):
+            return JSONResponse({"error": "segments must be a list"}, 400)
+
+        # Validate up front: the loop below indexes seg["text"]/["start"]/["end"]
+        # and peeks segments[i + 1] for the granularity-aware line-break logic,
+        # so a malformed segment (missing key, non-numeric start/end, a
+        # non-dict entry — e.g. a truncated /align response, or a hand-crafted
+        # request) would otherwise raise KeyError/TypeError/AttributeError and
+        # 500 the whole save instead of reporting a clear 400.
+        for i, seg in enumerate(segments):
+            if not isinstance(seg, dict):
+                return JSONResponse({"error": f"segment {i} is not an object"}, 400)
+            if not isinstance(seg.get("text"), str):
+                return JSONResponse({"error": f"segment {i} is missing a string 'text'"}, 400)
+            try:
+                float(seg["start"])
+                float(seg["end"])
+            except (KeyError, TypeError, ValueError):
+                return JSONResponse({"error": f"segment {i} has a non-numeric start/end"}, 400)
 
         resolved = _resolve_sloppak(filename)
         if resolved is None:
@@ -468,8 +539,8 @@ def setup(app: FastAPI, context: dict):
             if is_line_end and not text.endswith("+"):
                 text = text + "+"
             lyrics_data.append({
-                "t": round(seg["start"], 3),
-                "d": round(seg["end"] - seg["start"], 3),
+                "t": round(float(seg["start"]), 3),
+                "d": round(float(seg["end"]) - float(seg["start"]), 3),
                 "w": text,
             })
 
