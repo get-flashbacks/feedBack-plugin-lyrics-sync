@@ -212,10 +212,62 @@ def test_format_lrc_empty_segments_yields_trailing_newline_only():
     assert routes._format_lrc([]) == "\n"
 
 
+def test_ascii_safe_filename_component_folds_non_latin1_chars():
+    # Starlette encodes header values as Latin-1; anything above U+00FF must
+    # be folded before it reaches a raw `filename=` fallback or the response
+    # raises UnicodeEncodeError at send time.
+    folded = routes._ascii_safe_filename_component("\u7c73\u6d25\u7384\u5e2b - Lemon")
+    assert folded == "____ - Lemon"
+    folded.encode("latin-1")  # must not raise
+
+
+def test_ascii_safe_filename_component_leaves_ascii_untouched():
+    assert routes._ascii_safe_filename_component("My Song - Artist") == "My Song - Artist"
+
+
 def test_format_lrc_word_level_inlines_word_timestamps():
     segments = [
         {"start": 0.0, "text": "Hello World", "words": [
             {"start": 0.0, "text": "Hello"},
+            {"start": 0.5, "text": "World"},
+        ]},
+    ]
+    lrc = routes._format_lrc_word_level(segments)
+    assert lrc == "[00:00.00]<00:00.00>Hello <00:00.50>World\n"
+
+
+def test_lrc_timestamp_rolls_seconds_into_next_minute_on_rounding():
+    # int(t // 60) + f"{t % 60:05.2f}" independently truncates the minute and
+    # rounds the seconds, so a value like 119.999 used to print the invalid
+    # "01:60.00" instead of rolling over to "02:00.00". Round to whole
+    # centiseconds first, then split, so the carry happens before formatting.
+    assert routes._lrc_timestamp(119.999) == "02:00.00"
+    assert routes._lrc_timestamp(59.996) == "01:00.00"
+    assert routes._lrc_timestamp(65.0) == "01:05.00"
+    assert routes._lrc_timestamp(0.0) == "00:00.00"
+
+
+def test_format_lrc_skips_malformed_segments_instead_of_raising():
+    segments = [
+        {"start": 1.0, "text": "kept"},
+        {"text": "missing start"},
+        "not a dict",
+        {"start": "not a number", "text": "bad start"},
+        None,
+    ]
+    assert routes._format_lrc(segments) == "[00:01.00]kept\n"
+
+
+def test_format_lrc_missing_text_defaults_to_empty_string():
+    assert routes._format_lrc([{"start": 1.0}]) == "[00:01.00]\n"
+
+
+def test_format_lrc_word_level_skips_malformed_words():
+    segments = [
+        {"start": 0.0, "text": "Hello World", "words": [
+            {"start": 0.0, "text": "Hello"},
+            {"text": "no start, dropped"},
+            "not a dict",
             {"start": 0.5, "text": "World"},
         ]},
     ]
