@@ -312,3 +312,25 @@ def test_format_lrc_word_level_skips_non_finite_start_and_word_start():
     ]
     lrc = routes._format_lrc_word_level(segments)
     assert lrc == "[00:00.00]<00:00.50>kept-word\n"
+
+
+def test_lrc_timestamp_rejects_a_finite_value_that_overflows_when_scaled():
+    # 1e307 passes math.isfinite() (it's a real, finite double) -- the
+    # callers' `if not math.isfinite(t): continue` guard doesn't catch it
+    # -- but 1e307 * 100 = 1e309 exceeds the max representable double and
+    # becomes inf, so round() on the scaled value used to raise the exact
+    # OverflowError the finiteness check was meant to prevent.
+    try:
+        routes._lrc_timestamp(1e307)
+        raised = None
+    except ValueError as exc:
+        raised = exc
+    assert raised is not None and "finite" in str(raised)
+
+
+def test_format_lrc_skips_a_finite_value_that_overflows_when_scaled():
+    segments = [
+        {"start": 1.0, "text": "kept"},
+        {"start": 1e307, "text": "overflows-when-scaled dropped"},
+    ]
+    assert routes._format_lrc(segments) == "[00:01.00]kept\n"

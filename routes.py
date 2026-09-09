@@ -191,7 +191,17 @@ def _lrc_timestamp(t: float) -> str:
     FIRST, then split into minutes/seconds, so the rollover happens before
     formatting rather than during it.
     """
-    total_centis = round(max(0.0, float(t)) * 100)
+    seconds = float(t)
+    # Callers gate on math.isfinite(t) before calling, but that alone
+    # isn't enough: a value can be finite and still overflow once scaled
+    # to centiseconds (e.g. 1e307 * 100 = 1e309 exceeds the max
+    # representable double and becomes inf), which round() below would
+    # turn into an unhelpful OverflowError instead of the clean skip the
+    # finiteness check was meant to guarantee.
+    scaled = max(0.0, seconds) * 100
+    if not math.isfinite(scaled):
+        raise ValueError("LRC timestamp must be finite")
+    total_centis = round(scaled)
     minutes, centis = divmod(total_centis, 6000)
     return f"{minutes:02d}:{centis / 100:05.2f}"
 
@@ -215,7 +225,11 @@ def _format_lrc(segments: list[dict]) -> str:
             continue
         if not math.isfinite(t):
             continue
-        lines.append(f"[{_lrc_timestamp(t)}]{seg.get('text', '')}")
+        try:
+            timestamp = _lrc_timestamp(t)
+        except ValueError:
+            continue
+        lines.append(f"[{timestamp}]{seg.get('text', '')}")
     return "\n".join(lines) + "\n"
 
 
@@ -244,9 +258,17 @@ def _format_lrc_word_level(segments: list[dict]) -> str:
                     continue
                 if not math.isfinite(wt):
                     continue
-                word_parts.append(f"<{_lrc_timestamp(wt)}>{w.get('text', '')}")
+                try:
+                    word_timestamp = _lrc_timestamp(wt)
+                except ValueError:
+                    continue
+                word_parts.append(f"<{word_timestamp}>{w.get('text', '')}")
             text = " ".join(word_parts)
-        lines.append(f"[{_lrc_timestamp(t)}]{text}")
+        try:
+            timestamp = _lrc_timestamp(t)
+        except ValueError:
+            continue
+        lines.append(f"[{timestamp}]{text}")
     return "\n".join(lines) + "\n"
 
 
