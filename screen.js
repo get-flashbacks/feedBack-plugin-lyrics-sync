@@ -1260,12 +1260,13 @@ function _lsEditorRenderLineList(list) {
     const rows = _lsEditorLineRows();
     rows.forEach((line) => {
         const selected = line.items.some(({ index }) => index === _lsEditorSelectedIndex);
+        const firstTimed = line.items.find(({ syl }) => syl.t != null);
+        const untimedCount = line.items.filter(({ syl }) => syl.t == null || syl.d == null).length;
         const row = document.createElement('div');
         row.className = 'flex items-start gap-2 px-3 py-2 text-xs cursor-pointer hover:bg-dark-800/60 transition '
             + (selected ? 'bg-accent/10' : '');
-        row.addEventListener('click', () => _lsEditorSelectSyllable(line.startIndex));
+        row.addEventListener('click', () => _lsEditorSelectSyllable(firstTimed ? firstTimed.index : line.startIndex));
 
-        const firstTimed = line.items.find(({ syl }) => syl.t != null);
         const timeEl = document.createElement('span');
         timeEl.className = 'text-gray-500 font-mono w-16 shrink-0 pt-0.5';
         timeEl.textContent = firstTimed ? `${firstTimed.syl.t.toFixed(2)}s` : '-';
@@ -1281,6 +1282,12 @@ function _lsEditorRenderLineList(list) {
         row.appendChild(timeEl);
         row.appendChild(textEl);
         row.appendChild(countEl);
+        if (untimedCount > 0) {
+            const untimedBadge = document.createElement('span');
+            untimedBadge.className = 'text-[10px] text-yellow-500 shrink-0 pt-0.5';
+            untimedBadge.textContent = `${untimedCount} untimed`;
+            row.appendChild(untimedBadge);
+        }
         list.appendChild(row);
     });
 }
