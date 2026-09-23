@@ -374,6 +374,7 @@ let _lsEditorWaveformPeaks = null;   // Float32Array [min,max] pairs, one per co
 let _lsEditorWaveformDuration = 0;
 let _lsEditorOffscreen = null;       // waveform pre-rendered here; blitted every frame
 let _lsEditorDragState = null;       // {index, mode, startX, origT, origD, pointerId}
+let _lsEditorListGrouping = 'word';  // 'word' shows raw entries; 'line' folds entries up to each brk marker
 const _lsEditorEls = {};             // cached DOM refs, (re)resolved in _lsEditorCacheEls
 
 function _lsEditorCloneSyllables(arr) {
@@ -594,6 +595,9 @@ function _lsEditorCacheEls() {
     _lsEditorEls.canvas = document.getElementById('ls-editor-canvas');
     _lsEditorEls.seedText = document.getElementById('ls-editor-seed-text');
     _lsEditorEls.count = document.getElementById('ls-editor-count');
+    _lsEditorEls.countLabel = document.getElementById('ls-editor-count-label');
+    _lsEditorEls.viewWordBtn = document.getElementById('ls-editor-view-word-btn');
+    _lsEditorEls.viewLineBtn = document.getElementById('ls-editor-view-line-btn');
     _lsEditorEls.list = document.getElementById('ls-editor-list');
     _lsEditorEls.inspector = document.getElementById('ls-editor-inspector');
     _lsEditorEls.inspText = document.getElementById('ls-editor-insp-text');
@@ -1181,40 +1185,128 @@ function _lsEditorOnKeyDown(e) {
 
 // ── List rendering ───────────────────────────────────────────────────────
 
+function lsEditorSetListGrouping(grouping) {
+    if (grouping !== 'word' && grouping !== 'line') return;
+    _lsEditorListGrouping = grouping;
+    _lsEditorRenderList();
+}
+
+function _lsEditorUpdateGroupingButtons() {
+    const wordBtn = _lsEditorEls.viewWordBtn;
+    const lineBtn = _lsEditorEls.viewLineBtn;
+    if (!wordBtn || !lineBtn) return;
+    const active = 'px-2 py-1 rounded bg-accent/30 text-accent';
+    const inactive = 'px-2 py-1 rounded bg-dark-700 hover:bg-dark-600';
+    wordBtn.className = _lsEditorListGrouping === 'word' ? active : inactive;
+    lineBtn.className = _lsEditorListGrouping === 'line' ? active : inactive;
+}
+
+function _lsEditorLineRows() {
+    const rows = [];
+    let current = null;
+    _lsEditorSyllables.forEach((syl, index) => {
+        if (!current) current = { startIndex: index, items: [] };
+        current.items.push({ syl, index });
+        if (syl.brk) {
+            rows.push(current);
+            current = null;
+        }
+    });
+    if (current) rows.push(current);
+    return rows;
+}
+
+function _lsEditorLineText(items) {
+    let text = '';
+    items.forEach(({ syl }, i) => {
+        text += syl.w;
+        if (!syl.join && i < items.length - 1) text += ' ';
+    });
+    return text;
+}
+
+function _lsEditorAppendWordRow(list, syl, i) {
+    const row = document.createElement('div');
+    row.className = 'flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-dark-800/60 transition '
+        + (i === _lsEditorSelectedIndex ? 'bg-accent/10' : '');
+    row.addEventListener('click', () => _lsEditorSelectSyllable(i));
+
+    const timeEl = document.createElement('span');
+    timeEl.className = 'text-gray-500 font-mono w-16 shrink-0';
+    timeEl.textContent = syl.t != null ? `${syl.t.toFixed(2)}s` : '-';
+
+    const wordEl = document.createElement('span');
+    wordEl.className = 'text-gray-200 flex-1 truncate';
+    wordEl.textContent = syl.w + (syl.join ? '-' : syl.brk ? '+' : '');
+
+    row.appendChild(timeEl);
+    row.appendChild(wordEl);
+
+    if (syl.t == null || syl.d == null) {
+        const untimedBadge = document.createElement('span');
+        untimedBadge.className = 'text-[10px] text-yellow-500 shrink-0';
+        untimedBadge.textContent = 'untimed';
+        row.appendChild(untimedBadge);
+    }
+
+    list.appendChild(row);
+}
+
+function _lsEditorRenderWordList(list) {
+    _lsEditorSyllables.forEach((syl, i) => _lsEditorAppendWordRow(list, syl, i));
+}
+
+function _lsEditorRenderLineList(list) {
+    const rows = _lsEditorLineRows();
+    rows.forEach((line) => {
+        const selected = line.items.some(({ index }) => index === _lsEditorSelectedIndex);
+        const row = document.createElement('div');
+        row.className = 'flex items-start gap-2 px-3 py-2 text-xs cursor-pointer hover:bg-dark-800/60 transition '
+            + (selected ? 'bg-accent/10' : '');
+        row.addEventListener('click', () => _lsEditorSelectSyllable(line.startIndex));
+
+        const firstTimed = line.items.find(({ syl }) => syl.t != null);
+        const timeEl = document.createElement('span');
+        timeEl.className = 'text-gray-500 font-mono w-16 shrink-0 pt-0.5';
+        timeEl.textContent = firstTimed ? `${firstTimed.syl.t.toFixed(2)}s` : '-';
+
+        const textEl = document.createElement('span');
+        textEl.className = 'text-gray-200 flex-1 leading-5';
+        textEl.textContent = _lsEditorLineText(line.items);
+
+        const countEl = document.createElement('span');
+        countEl.className = 'text-[10px] text-gray-600 shrink-0 pt-0.5';
+        countEl.textContent = `${line.items.length}`;
+
+        row.appendChild(timeEl);
+        row.appendChild(textEl);
+        row.appendChild(countEl);
+        list.appendChild(row);
+    });
+}
+
 function _lsEditorRenderList() {
     const list = _lsEditorEls.list;
-    if (_lsEditorEls.count) _lsEditorEls.count.textContent = String(_lsEditorSyllables.length);
+    const lineCount = _lsEditorLineRows().length;
+    if (_lsEditorEls.count) {
+        _lsEditorEls.count.textContent = String(_lsEditorListGrouping === 'line' ? lineCount : _lsEditorSyllables.length);
+    }
+    if (_lsEditorEls.countLabel) {
+        if (_lsEditorListGrouping === 'line') {
+            _lsEditorEls.countLabel.textContent = `line${lineCount !== 1 ? 's' : ''}`;
+        } else {
+            const count = _lsEditorSyllables.length;
+            _lsEditorEls.countLabel.textContent = `syllable${count !== 1 ? 's' : ''}`;
+        }
+    }
+    _lsEditorUpdateGroupingButtons();
     if (!list) return;
 
     // createElement + textContent, never interpolated markup — lyric text
     // comes from pasted/uploaded input, not trusted for HTML context.
     list.innerHTML = '';
-    _lsEditorSyllables.forEach((syl, i) => {
-        const row = document.createElement('div');
-        row.className = 'flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-dark-800/60 transition '
-            + (i === _lsEditorSelectedIndex ? 'bg-accent/10' : '');
-        row.addEventListener('click', () => _lsEditorSelectSyllable(i));
-
-        const timeEl = document.createElement('span');
-        timeEl.className = 'text-gray-500 font-mono w-16 shrink-0';
-        timeEl.textContent = syl.t != null ? `${syl.t.toFixed(2)}s` : '—';
-
-        const wordEl = document.createElement('span');
-        wordEl.className = 'text-gray-200 flex-1 truncate';
-        wordEl.textContent = syl.w + (syl.join ? '-' : syl.brk ? '+' : '');
-
-        row.appendChild(timeEl);
-        row.appendChild(wordEl);
-
-        if (syl.t == null || syl.d == null) {
-            const untimedBadge = document.createElement('span');
-            untimedBadge.className = 'text-[10px] text-yellow-500 shrink-0';
-            untimedBadge.textContent = 'untimed';
-            row.appendChild(untimedBadge);
-        }
-
-        list.appendChild(row);
-    });
+    if (_lsEditorListGrouping === 'line') _lsEditorRenderLineList(list);
+    else _lsEditorRenderWordList(list);
 }
 
 function _lsEditorRenderAll() {

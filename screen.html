@@ -171,7 +171,16 @@
 
         <!-- Syllable list -->
         <div class="mb-3">
-            <div class="text-xs text-gray-500 mb-1"><span id="ls-editor-count">0</span> syllables</div>
+            <div class="flex items-center justify-between gap-3 mb-1">
+                <div class="text-xs text-gray-500"><span id="ls-editor-count">0</span> <span id="ls-editor-count-label">syllables</span></div>
+                <div class="flex items-center gap-1 text-xs text-gray-400">
+                    View:
+                    <button onclick="lsEditorSetListGrouping('word')" id="ls-editor-view-word-btn"
+                        class="px-2 py-1 rounded bg-accent/30 text-accent">Words</button>
+                    <button onclick="lsEditorSetListGrouping('line')" id="ls-editor-view-line-btn"
+                        class="px-2 py-1 rounded bg-dark-700 hover:bg-dark-600">Lines</button>
+                </div>
+            </div>
             <div id="ls-editor-list" class="bg-dark-900 border border-gray-800 rounded-lg max-h-64 overflow-y-auto divide-y divide-gray-800/60"></div>
         </div>
 
