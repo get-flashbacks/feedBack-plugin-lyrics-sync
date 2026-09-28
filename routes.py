@@ -272,6 +272,38 @@ def _format_lrc_word_level(segments: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _alignment_plausibility_errors(segments: object, granularity: str) -> list[str]:
+    """Return safety errors for an alignment preview before it can be saved."""
+    if not isinstance(segments, list) or not segments:
+        return ["alignment returned no segments"]
+    if granularity not in {"word", "syllable"}:
+        return []
+    previous_start = None
+    previous_in_line = None
+    errors = []
+    for index, segment in enumerate(segments):
+        if not isinstance(segment, dict):
+            return [f"alignment segment {index} is not an object"]
+        try:
+            start = float(segment["start"])
+        except (KeyError, TypeError, ValueError):
+            return [f"alignment segment {index} has no numeric start time"]
+        if not math.isfinite(start):
+            return [f"alignment segment {index} has a non-finite start time"]
+        if previous_start is not None and start < previous_start:
+            return ["alignment timestamps are not monotonic"]
+        if segment.get("new_line"):
+            previous_in_line = None
+        if previous_in_line is not None and start - previous_in_line > 8.0:
+            errors.append(
+                f"implausible {start - previous_in_line:.1f}s gap within lyric line "
+                f"before segment {index + 1}"
+            )
+        previous_start = start
+        previous_in_line = start
+    return errors
+
+
 # ── Persistence: write lyrics.json + patch manifest + re-zip ──────────────────
 
 def _atomic_write_json(path: Path, payload) -> None:
@@ -442,6 +474,21 @@ def setup(app: FastAPI, context: dict):
                 return JSONResponse(
                     {"error": f"Alignment failed: {result['error']}"},
                     502,
+                )
+
+            plausibility_errors = _alignment_plausibility_errors(
+                result.get("segments"), granularity,
+            )
+            if plausibility_errors:
+                # /align is read-only: rejecting this preview leaves any
+                # existing lyrics unchanged instead of offering bad data to
+                # the separate save route.
+                return JSONResponse(
+                    {
+                        "error": "Alignment preview is unsafe to save",
+                        "details": plausibility_errors,
+                    },
+                    422,
                 )
 
             return result
