@@ -18,6 +18,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import routes  # noqa: E402
 
 
+def test_word_alignment_rejects_duet_like_within_line_gap():
+    """Ordered duet words can still be unsafe within a caller lyric line."""
+    segments = [
+        {"text": "How", "start": 0.031, "new_line": True},
+        {"text": "can", "start": 0.11},
+        {"text": "you", "start": 14.49},
+    ]
+    errors = routes._alignment_plausibility_errors(segments, "word")
+    assert errors and "within lyric line" in errors[0]
+
+
+def test_word_alignment_allows_gap_at_a_line_boundary():
+    segments = [
+        {"text": "first", "start": 0.0, "new_line": True},
+        {"text": "line", "start": 0.4},
+        {"text": "next", "start": 20.0, "new_line": True},
+    ]
+    assert routes._alignment_plausibility_errors(segments, "word") == []
+
+
 # ── path containment ───────────────────────────────────────────────────────
 
 def test_safe_dlc_path_rejects_traversal_and_absolute(tmp_path):
