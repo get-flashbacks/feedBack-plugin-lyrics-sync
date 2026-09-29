@@ -280,6 +280,50 @@ def _format_lrc_word_level(segments: list[dict]) -> str:
 MAX_GAP_WITHIN_LINE_SECONDS = 8.0
 
 
+def _parse_segment_span(segment: dict, index: int) -> tuple[float, float | None] | str:
+    """Parse and validate one segment's `start`/`end`.
+
+    Returns `(start, end)` (`end` is `None` when the segment carries none)
+    on success, or a single error string on failure. Split out of
+    `_alignment_plausibility_errors` so that function reads as a sequence of
+    checks rather than one large branchy body.
+    """
+    try:
+        start = float(segment["start"])
+    except (KeyError, TypeError, ValueError):
+        return f"alignment segment {index} has no numeric start time"
+    if not math.isfinite(start):
+        return f"alignment segment {index} has a non-finite start time"
+
+    if "end" not in segment:
+        return start, None
+
+    try:
+        end = float(segment["end"])
+    except (TypeError, ValueError):
+        return f"alignment segment {index} has no numeric end time"
+    if not math.isfinite(end):
+        return f"alignment segment {index} has a non-finite end time"
+    # `/save` writes `d = end - start` with no `d <= 0` filter (unlike
+    # `/save-lyrics`), so a reversed span would land in lyrics.json.
+    if end < start:
+        return f"alignment segment {index} ends before it starts"
+    return start, end
+
+
+def _within_line_gap_error(
+    start: float, previous_in_line: float | None, index: int,
+) -> str | None:
+    """Return an error string when `start` opens too wide a gap since the
+    previous segment of the same lyric line, else `None`."""
+    if previous_in_line is None:
+        return None
+    gap = start - previous_in_line
+    if gap <= MAX_GAP_WITHIN_LINE_SECONDS:
+        return None
+    return f"implausible {gap:.1f}s gap within lyric line before segment {index + 1}"
+
+
 def _alignment_plausibility_errors(segments: object, granularity: str) -> list[str]:
     """Return safety errors for an alignment preview before it can be saved."""
     if not isinstance(segments, list) or not segments:
@@ -296,35 +340,22 @@ def _alignment_plausibility_errors(segments: object, granularity: str) -> list[s
     for index, segment in enumerate(segments):
         if not isinstance(segment, dict):
             return [f"alignment segment {index} is not an object"]
-        try:
-            start = float(segment["start"])
-        except (KeyError, TypeError, ValueError):
-            return [f"alignment segment {index} has no numeric start time"]
-        if not math.isfinite(start):
-            return [f"alignment segment {index} has a non-finite start time"]
+
+        parsed = _parse_segment_span(segment, index)
+        if isinstance(parsed, str):
+            return [parsed]
+        start, _end = parsed
+
         if previous_start is not None and start < previous_start:
             return ["alignment timestamps are not monotonic"]
-        if "end" in segment:
-            try:
-                end = float(segment["end"])
-            except (TypeError, ValueError):
-                return [f"alignment segment {index} has no numeric end time"]
-            if not math.isfinite(end):
-                return [f"alignment segment {index} has a non-finite end time"]
-            # `/save` writes `d = end - start` with no `d <= 0` filter (unlike
-            # `/save-lyrics`), so a reversed span would land in lyrics.json.
-            if end < start:
-                return [f"alignment segment {index} ends before it starts"]
+
         if check_gaps:
             if segment.get("new_line"):
                 previous_in_line = None
-            if previous_in_line is not None:
-                gap = start - previous_in_line
-                if gap > MAX_GAP_WITHIN_LINE_SECONDS:
-                    errors.append(
-                        f"implausible {gap:.1f}s gap within lyric line "
-                        f"before segment {index + 1}"
-                    )
+            gap_error = _within_line_gap_error(start, previous_in_line, index)
+            if gap_error:
+                errors.append(gap_error)
+
         previous_start = start
         previous_in_line = start
     return errors
