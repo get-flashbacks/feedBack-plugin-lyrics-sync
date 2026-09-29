@@ -272,12 +272,24 @@ def _format_lrc_word_level(segments: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# Widest gap tolerated between two segments of the same lyric line. A duet
+# hands off to the second singer partway through a line, so anything wider is
+# far likelier to be a word aligned into the wrong place than a deliberate
+# pause — pauses *between* lines are unconstrained, because the server marks
+# those with `new_line` rather than with timing.
+MAX_GAP_WITHIN_LINE_SECONDS = 8.0
+
+
 def _alignment_plausibility_errors(segments: object, granularity: str) -> list[str]:
     """Return safety errors for an alignment preview before it can be saved."""
     if not isinstance(segments, list) or not segments:
         return ["alignment returned no segments"]
-    if granularity not in {"word", "syllable"}:
-        return []
+    # The within-line gap rule needs the server's `new_line` markers, which
+    # only word/syllable responses carry — at `line` granularity every
+    # segment is already a whole line. The per-segment checks below hold at
+    # every granularity: a reversed or non-finite span is just as unsavable
+    # whichever way the caller asked for it.
+    check_gaps = granularity in {"word", "syllable"}
     previous_start = None
     previous_in_line = None
     errors = []
@@ -292,13 +304,27 @@ def _alignment_plausibility_errors(segments: object, granularity: str) -> list[s
             return [f"alignment segment {index} has a non-finite start time"]
         if previous_start is not None and start < previous_start:
             return ["alignment timestamps are not monotonic"]
-        if segment.get("new_line"):
-            previous_in_line = None
-        if previous_in_line is not None and start - previous_in_line > 8.0:
-            errors.append(
-                f"implausible {start - previous_in_line:.1f}s gap within lyric line "
-                f"before segment {index + 1}"
-            )
+        if "end" in segment:
+            try:
+                end = float(segment["end"])
+            except (TypeError, ValueError):
+                return [f"alignment segment {index} has no numeric end time"]
+            if not math.isfinite(end):
+                return [f"alignment segment {index} has a non-finite end time"]
+            # `/save` writes `d = end - start` with no `d <= 0` filter (unlike
+            # `/save-lyrics`), so a reversed span would land in lyrics.json.
+            if end < start:
+                return [f"alignment segment {index} ends before it starts"]
+        if check_gaps:
+            if segment.get("new_line"):
+                previous_in_line = None
+            if previous_in_line is not None:
+                gap = start - previous_in_line
+                if gap > MAX_GAP_WITHIN_LINE_SECONDS:
+                    errors.append(
+                        f"implausible {gap:.1f}s gap within lyric line "
+                        f"before segment {index + 1}"
+                    )
         previous_start = start
         previous_in_line = start
     return errors

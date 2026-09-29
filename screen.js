@@ -198,10 +198,19 @@ async function lsAlign() {
         const data = await resp.json();
 
         if (data.error) {
+            // A plausibility rejection (422) names the offending segments in
+            // `details`; without them the user only sees "unsafe to save"
+            // and has to guess whether to retry, re-align, or change
+            // granularity.
+            const details = (Array.isArray(data.details) && data.details.length)
+                ? `<ul class="mt-2 space-y-1 text-gray-500">${data.details
+                    .map(d => `<li>${esc(d)}</li>`).join('')}</ul>`
+                : '';
             document.getElementById('ls-progress').innerHTML = `
                 <div class="bg-red-900/20 border border-red-800/30 rounded-xl p-4 text-sm">
                     <p class="text-red-400 font-semibold mb-1">Alignment failed</p>
                     <p class="text-gray-400">${esc(data.error)}</p>
+                    ${details}
                 </div>`;
             return;
         }

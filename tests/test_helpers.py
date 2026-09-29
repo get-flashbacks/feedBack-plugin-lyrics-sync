@@ -27,6 +27,8 @@ def test_word_alignment_rejects_duet_like_within_line_gap():
     ]
     errors = routes._alignment_plausibility_errors(segments, "word")
     assert errors and "within lyric line" in errors[0]
+    # The segment number is what the 422 surfaces to the user, so pin it.
+    assert "before segment 3" in errors[0]
 
 
 def test_word_alignment_allows_gap_at_a_line_boundary():
@@ -36,6 +38,43 @@ def test_word_alignment_allows_gap_at_a_line_boundary():
         {"text": "next", "start": 20.0, "new_line": True},
     ]
     assert routes._alignment_plausibility_errors(segments, "word") == []
+
+
+def test_word_alignment_allows_a_gap_under_the_line_threshold():
+    """The within-line rule is a wide tolerance, not a no-gap requirement."""
+    segments = [
+        {"text": "How", "start": 0.031, "new_line": True},
+        {"text": "can", "start": 7.5},
+    ]
+    assert routes._alignment_plausibility_errors(segments, "word") == []
+
+
+def test_alignment_rejects_unusable_segment_end_times():
+    """`/save` writes `d = end - start` unfiltered, so a bad end lands in lyrics.json."""
+    cases = [
+        ({"text": "you", "start": 1.0, "end": "soon"}, "no numeric end time"),
+        ({"text": "you", "start": 1.0, "end": float("nan")}, "non-finite end time"),
+        ({"text": "you", "start": 14.49, "end": 14.2}, "ends before it starts"),
+    ]
+    for segment, expected in cases:
+        errors = routes._alignment_plausibility_errors([segment], "word")
+        assert len(errors) == 1 and expected in errors[0], segment
+
+
+def test_line_granularity_skips_the_within_line_gap_but_not_chronology():
+    """`line` responses carry no `new_line`, so only the gap rule is skipped."""
+    spaced = [
+        {"text": "first line", "start": 0.0, "end": 3.0},
+        {"text": "second line", "start": 20.0, "end": 24.0},
+    ]
+    assert routes._alignment_plausibility_errors(spaced, "line") == []
+    out_of_order = [
+        {"text": "first line", "start": 20.0, "end": 24.0},
+        {"text": "second line", "start": 0.0, "end": 3.0},
+    ]
+    assert routes._alignment_plausibility_errors(out_of_order, "line") == [
+        "alignment timestamps are not monotonic"
+    ]
 
 
 # ── path containment ───────────────────────────────────────────────────────
