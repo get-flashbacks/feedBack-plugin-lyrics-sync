@@ -21,9 +21,9 @@ import routes  # noqa: E402
 def test_word_alignment_rejects_duet_like_within_line_gap():
     """Ordered duet words can still be unsafe within a caller lyric line."""
     segments = [
-        {"text": "How", "start": 0.031, "new_line": True},
-        {"text": "can", "start": 0.11},
-        {"text": "you", "start": 14.49},
+        {"text": "How", "start": 0.031, "end": 0.09, "new_line": True},
+        {"text": "can", "start": 0.11, "end": 0.3},
+        {"text": "you", "start": 14.49, "end": 14.9},
     ]
     errors = routes._alignment_plausibility_errors(segments, "word")
     assert errors and "within lyric line" in errors[0]
@@ -33,9 +33,9 @@ def test_word_alignment_rejects_duet_like_within_line_gap():
 
 def test_word_alignment_allows_gap_at_a_line_boundary():
     segments = [
-        {"text": "first", "start": 0.0, "new_line": True},
-        {"text": "line", "start": 0.4},
-        {"text": "next", "start": 20.0, "new_line": True},
+        {"text": "first", "start": 0.0, "end": 0.3, "new_line": True},
+        {"text": "line", "start": 0.4, "end": 0.9},
+        {"text": "next", "start": 20.0, "end": 20.5, "new_line": True},
     ]
     assert routes._alignment_plausibility_errors(segments, "word") == []
 
@@ -43,8 +43,8 @@ def test_word_alignment_allows_gap_at_a_line_boundary():
 def test_word_alignment_allows_a_gap_under_the_line_threshold():
     """The within-line rule is a wide tolerance, not a no-gap requirement."""
     segments = [
-        {"text": "How", "start": 0.031, "new_line": True},
-        {"text": "can", "start": 7.5},
+        {"text": "How", "start": 0.031, "end": 0.09, "new_line": True},
+        {"text": "can", "start": 7.5, "end": 7.9},
     ]
     assert routes._alignment_plausibility_errors(segments, "word") == []
 
@@ -59,6 +59,15 @@ def test_alignment_rejects_unusable_segment_end_times():
     for segment, expected in cases:
         errors = routes._alignment_plausibility_errors([segment], "word")
         assert len(errors) == 1 and expected in errors[0], segment
+
+
+def test_alignment_rejects_a_missing_end_however_it_is_spelled():
+    """`/save` refuses both shapes, so the preview must too — otherwise it
+    renders fine and the user only hits a 400 after saving."""
+    for segment in ({"text": "you", "start": 1.0}, {"text": "you", "start": 1.0, "end": None}):
+        assert routes._alignment_plausibility_errors([segment], "word") == [
+            "alignment segment 0 has no numeric end time"
+        ]
 
 
 def test_line_granularity_skips_the_within_line_gap_but_not_chronology():

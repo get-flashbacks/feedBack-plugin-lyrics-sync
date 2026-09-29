@@ -280,13 +280,12 @@ def _format_lrc_word_level(segments: list[dict]) -> str:
 MAX_GAP_WITHIN_LINE_SECONDS = 8.0
 
 
-def _parse_segment_span(segment: dict, index: int) -> tuple[float, float | None] | str:
+def _parse_segment_span(segment: dict, index: int) -> tuple[float, float] | str:
     """Parse and validate one segment's `start`/`end`.
 
-    Returns `(start, end)` (`end` is `None` when the segment carries none)
-    on success, or a single error string on failure. Split out of
-    `_alignment_plausibility_errors` so that function reads as a sequence of
-    checks rather than one large branchy body.
+    Returns `(start, end)` on success, or a single error string on failure.
+    Split out of `_alignment_plausibility_errors` so that function reads as a
+    sequence of checks rather than one large branchy body.
     """
     try:
         start = float(segment["start"])
@@ -295,12 +294,14 @@ def _parse_segment_span(segment: dict, index: int) -> tuple[float, float | None]
     if not math.isfinite(start):
         return f"alignment segment {index} has a non-finite start time"
 
-    if "end" not in segment:
-        return start, None
-
+    # `end` is required, not merely validated when present: `/save` and the
+    # editor both compute `end - start` unconditionally, so tolerating a
+    # missing one here lets the preview through and then 400s (or writes a
+    # `NaN` duration) at save time. A missing key and an explicit `null` must
+    # therefore reach the same verdict.
     try:
         end = float(segment["end"])
-    except (TypeError, ValueError):
+    except (KeyError, TypeError, ValueError):
         return f"alignment segment {index} has no numeric end time"
     if not math.isfinite(end):
         return f"alignment segment {index} has a non-finite end time"
