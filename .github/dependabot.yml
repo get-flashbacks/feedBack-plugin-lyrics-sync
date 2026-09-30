@@ -1,5 +1,6 @@
 # Group minor/patch version updates to limit PR noise.
-# Preserve existing schedules and major-version restrictions; no auto-merge.
+# Monthly checks; major updates remain outside the minor/patch groups.
+# Groups apply to version updates, not security updates or automatic merging.
 version: 2
 updates:
 - package-ecosystem: github-actions
