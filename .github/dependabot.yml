@@ -1,5 +1,5 @@
 # Group minor/patch version updates to limit PR noise.
-# Monthly checks; major updates remain outside the minor/patch groups.
+# Monthly checks; major updates stay as individual PRs for review.
 # Groups apply to version updates, not security updates or automatic merging.
 version: 2
 updates:
