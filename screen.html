@@ -79,16 +79,30 @@
     <div id="ls-preview" class="hidden mb-8">
         <h3 class="text-sm font-semibold text-gray-300 mb-3">Preview</h3>
         <div id="ls-preview-lines" class="bg-dark-800 border border-gray-800 rounded-xl p-4 max-h-96 overflow-y-auto space-y-1 font-mono text-sm"></div>
-        <div class="flex items-center gap-3 mt-4">
-            <button onclick="lsExport()" class="bg-accent hover:bg-accent-light px-5 py-2 rounded-lg text-sm text-white font-semibold transition">
-                Download .lrc
-            </button>
-            <button onclick="lsSave()" id="ls-save-btn" class="bg-dark-600 hover:bg-dark-500 px-5 py-2 rounded-lg text-sm text-gray-300 transition">
-                Save to Song
-            </button>
-            <button onclick="lsEditInEditor()" class="bg-dark-600 hover:bg-dark-500 px-5 py-2 rounded-lg text-sm text-gray-300 transition">
-                Edit Manually
-            </button>
+        <div class="flex flex-wrap items-center gap-3 mt-4">
+            <div class="flex items-center gap-3 text-sm text-gray-400">
+                <span>Granularity:</span>
+                <label class="flex items-center gap-1.5 cursor-pointer">
+                    <input type="radio" name="ls-preview-granularity" value="line" checked class="accent-accent"> Line
+                </label>
+                <label class="flex items-center gap-1.5 cursor-pointer">
+                    <input type="radio" name="ls-preview-granularity" value="word" class="accent-accent"> Word
+                </label>
+                <label class="flex items-center gap-1.5 cursor-pointer">
+                    <input type="radio" name="ls-preview-granularity" value="syllable" class="accent-accent"> Syllable
+                </label>
+            </div>
+            <div class="flex items-center gap-3 ml-auto">
+                <button onclick="lsExport()" class="bg-accent hover:bg-accent-light px-5 py-2 rounded-lg text-sm text-white font-semibold transition">
+                    Download .lrc
+                </button>
+                <button onclick="lsSave()" id="ls-save-btn" class="bg-dark-600 hover:bg-dark-500 px-5 py-2 rounded-lg text-sm text-gray-300 transition">
+                    Save to Song
+                </button>
+                <button onclick="lsEditInEditor()" class="bg-dark-600 hover:bg-dark-500 px-5 py-2 rounded-lg text-sm text-gray-300 transition">
+                    Edit Manually
+                </button>
+            </div>
         </div>
         <p id="ls-save-status" class="text-xs text-gray-500 mt-2 hidden"></p>
     </div>

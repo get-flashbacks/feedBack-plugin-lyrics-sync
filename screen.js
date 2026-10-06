@@ -170,6 +170,11 @@ function _lsGetGranularity() {
     return checked ? checked.value : 'line';
 }
 
+function _lsGetPreviewGranularity() {
+    const checked = document.querySelector('input[name="ls-preview-granularity"]:checked');
+    return checked ? checked.value : _lsGetGranularity();
+}
+
 async function lsAlign() {
     if (!_lsSelectedFilename) return;
     const lyricsText = document.getElementById('ls-lyrics').value.trim();
@@ -253,7 +258,7 @@ function _lsGroupSegmentsByLine(segments) {
 
 function _lsRenderPreview(segments) {
     const container = document.getElementById('ls-preview-lines');
-    const granularity = _lsGetGranularity();
+    const granularity = _lsGetPreviewGranularity();
 
     // 'line' granularity: each segment already IS a whole input line.
     // 'word'/'syllable': re-group into one row per line so chunks line up
@@ -269,11 +274,33 @@ function _lsRenderPreview(segments) {
     document.getElementById('ls-preview').classList.remove('hidden');
 }
 
+// Keep align-granularity and preview-granularity radios in sync
+document.addEventListener('change', (e) => {
+    if (e.target.name === 'ls-granularity') {
+        const val = e.target.value;
+        document.querySelectorAll('input[name="ls-preview-granularity"]').forEach(r => {
+            r.checked = r.value === val;
+        });
+        if (_lsAlignmentResult && _lsAlignmentResult.length > 0) {
+            _lsRenderPreview(_lsAlignmentResult);
+        }
+    } else if (e.target.name === 'ls-preview-granularity') {
+        const val = e.target.value;
+        document.querySelectorAll('input[name="ls-granularity"]').forEach(r => {
+            r.checked = r.value === val;
+        });
+        if (_lsAlignmentResult && _lsAlignmentResult.length > 0) {
+            _lsRenderPreview(_lsAlignmentResult);
+        }
+    }
+});
+
 // ── Export ────────────────────────────────────────────────────────────────
 
 async function lsExport() {
     if (!_lsAlignmentResult || _lsAlignmentResult.length === 0) return;
 
+    const granularity = _lsGetPreviewGranularity();
     const resp = await fetch('/api/plugins/lyrics_sync/export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -281,6 +308,7 @@ async function lsExport() {
             segments: _lsAlignmentResult,
             title: _lsSelectedTitle,
             artist: _lsSelectedArtist,
+            granularity: granularity,
         }),
     });
 
@@ -383,7 +411,7 @@ let _lsEditorWaveformPeaks = null;   // Float32Array [min,max] pairs, one per co
 let _lsEditorWaveformDuration = 0;
 let _lsEditorOffscreen = null;       // waveform pre-rendered here; blitted every frame
 let _lsEditorDragState = null;       // {index, mode, startX, origT, origD, pointerId}
-let _lsEditorListGrouping = 'word';  // 'word' shows raw entries; 'line' folds entries up to each brk marker
+let _lsEditorListGrouping = 'line';  // 'word' shows raw entries; 'line' folds entries up to each brk marker
 const _lsEditorEls = {};             // cached DOM refs, (re)resolved in _lsEditorCacheEls
 
 function _lsEditorCloneSyllables(arr) {

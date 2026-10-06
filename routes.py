@@ -577,7 +577,12 @@ def setup(app: FastAPI, context: dict):
         header_lines.append("[by:Slopsmith Lyrics Sync]")
         header = "\n".join(header_lines) + "\n"
 
-        lrc = header + _format_lrc(segments)
+        # Choose formatter based on granularity if provided in request
+        granularity_req = data.get("granularity", "line")
+        if granularity_req in ("word", "syllable"):
+            lrc = header + _format_lrc_word_level(segments)
+        else:
+            lrc = header + _format_lrc(segments)
 
         safe_name = f"{artist} - {title}".strip(" -") or "lyrics"
         safe_name = safe_name.replace("/", "_").replace("\\", "_")
